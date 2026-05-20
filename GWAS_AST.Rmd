@@ -1,0 +1,828 @@
+---
+title: "AST_GWAS"
+author: "Yael Hernandez"
+date: "2026-05-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Lab 1 - Upload the files
+
+```{r, message = FALSE}
+#Loading genomic and clinical data
+rm(list=ls())
+library(snpStats)
+
+bedFile<-"/home/yael/Documents/Statistical Genetics/GWAS_data.bed"
+bimFile<-"/home/yael/Documents/Statistical Genetics/GWAS_data.bim"
+famFile<-"/home/yael/Documents/Statistical Genetics/GWAS_data.fam"
+
+#read in the local files using read.plink() in snpStats
+data <- read.plink(bedFile,bimFile,famFile)
+
+clinicalFile <- "/home/yael/Documents/Statistical Genetics/Clinical_AST.csv"
+clinical <- read.csv(clinicalFile, stringsAsFactors = FALSE)
+
+# Convert column to its correct data type
+clinical$FamID <- as.character(clinical$FamID)
+clinical$age <- as.numeric(clinical$age)
+clinical$sex <- as.factor(clinical$sex)
+clinical$alcohol_drinks_pw <- as.numeric(clinical$alcohol_drinks_pw)
+clinical$smoking_status_0No_1Yes <- as.factor(clinical$smoking_status_0No_1Yes)
+clinical$BMI_cov <- as.numeric(clinical$BMI_cov)
+
+rownames(clinical) <- clinical$FamID
+
+#Convert AST to numeric - non-convertible values becomes NA.
+clinical$Serum_AST_UnitsL <- suppressWarnings(
+    as.numeric(clinical$Serum_AST_UnitsL)
+)
+
+#Also to read the GWAS_clinical.csv to add as covariate column CAD, to maintain the structural design of the cohort. (Case-Control of CAD) important to filter in HWE.
+gwasClinicalFile <- "/home/yael/Documents/Statistical Genetics/GWAS_clinical.csv"
+gwasClinical <- read.csv(gwasClinicalFile, stringsAsFactors = FALSE)
+clinical$CAD <- gwasClinical$CAD[match(rownames(clinical), gwasClinical$FamID)]
+```
+
+## **The .bim file**
+
+The .bim file contains information on each SNP and can be seen by calling the map \# element in the data object (note that .bim and .map file formats are similar).
+
+```{r}
+bim <- data$map
+head(bim)
+table(bim$chromosome)
+```
+
+As you can see from the fist six observations displayed above, this file has a row for each SNP and six columns describing the SNPs. The columns correspond to chromosome number, RS number (SNP identifier), genetic distance, the position on the chromosome and the two alleles, respectively. Note that in most contexts, “allele 1” is also referred to as the “minor allele” and “allele 2” refers to the “major allele” at each SNP. It is also important to note that SNP names and locations can change based on the genetic build your data is based on.
+
+Here, the RS numbers and positions are from build Hg19 or GRCh37.
+
+## **The .bed file**
+
+The raw version of the .bed file contains a binary version of the genotype data. This is the largest of the three files because it contains every SNP in the study, as well as the genotype at that snp for each individual. When we read this file into R, however, it’s automatically translated into the genotype information from the binary code. R then store this object as a SnpMatrix object that is critical to SNP analysis. This SnpMatrix corresponds to the genotypes element in the data object.
+
+```{r}
+bed <- data$genotypes
+head(data$genotypes)
+
+
+```
+
+## **The .fam file**
+
+Finally, the .fam file contains the participant identification information, including a row for each individual and six columns, corresponding to “Family ID Number”, “Sample ID Number”,“Paternal ID Number”, “Maternal ID Number”, “Sex”, and “Phenotype”. The .fam file can be called by referring to the .fam element of the data object.
+
+```{r}
+fam <- data$fam
+head(fam)
+```
+
+## **The clinical data**
+
+Finally, in some instances you may have access to a separate phenotype file that contains information on things like additional covariates for each individual and other “outcome variables” you may be interested in (e.g. something other than affected or variable that codes affected differently). The rows of this file represent each subject and the columns correspond to the available covariates and phenotypes. We read this data in separately as it is a simple .txt file.
+
+```{r}
+rownames(clinical) <- clinical$FamID
+print(head(clinical))
+```
+
+```{r}
+genotype <- data$genotypes
+genoMap <- data$map
+colnames(genoMap)<-c("chr", "SNP", "gen.dist", "position", "A1", "A2")
+
+snpsum.col <- col.summary(genotype)
+help(col.summary)
+head(snpsum.col)
+```
+
+## **Call rate (For SNP)**
+
+For a given SNP, its call rate is defined as the proportion of individuals in our study for which the corresponding SNP information is not missing. For example, a call rate of 95% for a certain SNP means that 95% of the individuals have data for this SNP. Thus to filter by call rate, we look at the column of Call.rate in our dataframe and choose the SNPs that has percentage of missing observations below our chosen threshold. In this module we set a call rate threshold to be 0.95 and then select for SNPs that pass the call rate.
+
+```{r}
+call.thresh <- 0.95
+keep.call <- with(snpsum.col, (!is.na(Call.rate) & Call.rate >= call.thresh))
+head(keep.call)
+
+keep.call[is.na(keep.call)] <- FALSE
+
+cat(ncol(genotype)-sum(keep.call),"SNPs will be removed due to low call rate.\n")
+
+genotype <- genotype[,keep.call]
+snpsum.col <- snpsum.col[keep.call,]
+
+print(genotype)
+summary(genotype)
+
+```
+
+**54,583 SNP will be removed due for call rate SNPs**
+
+## **Minor allele frequency (For SNPs)**
+
+Inadequate power to infer a statiscally significant relationship between the SNP and the trait under study is the result of a large degree of homogeneity at a given SNP across study participants. This occurs when we have a very small minor allele frequency (MAF), which means the majority of the individuals have two copies of the same major alleles. Minor allele frequency is defined as frequency of the less common allele at a variable site. In this module, we remove SNPs whose minor allele fequency is less than 1%. In other cases, particularly when sample size is small, we may apply a cut point of 5%.
+
+```{r}
+minor <- 0.01
+
+keep.minor <- with(snpsum.col, (!is.na(MAF) & MAF > minor) )
+keep.minor[is.na(keep.minor)] <- FALSE
+
+cat(ncol(genotype)-sum(keep.minor),"SNPs will be removed due to low MAF .\n"  )
+#63395 SNPs will be removed due to low MAF .
+```
+
+**63395 SNP will be removed due to low MAF**
+
+After knowing the SNPs needed to be removed, we subset the genotype and SNP summary data for the SNPs that pass MAF criteria.
+
+```{r}
+genotype <- genotype[,keep.minor] 
+snpsum.col <- snpsum.col[keep.minor,] 
+print(genotype)
+save(genotype,genoMap,snpsum.col,genoMap,bedFile,bimFile,famFile, clinical, file= "lab1_save.RData")
+
+```
+
+# **Lab 2 - Quality Control**
+
+```{r, message=FALSE}
+rm(list=ls())
+
+library(snpStats)
+library(SNPRelate)
+library(gdsfmt)
+library(dplyr)
+
+getwd()
+setwd("/home/yael/Documents/Statistical Genetics")
+load("lab1_save.RData")
+
+#specificy the number of threads for IBD and PCA functions
+numCores=4
+
+# calculate summary statistics for the genotype matrix per variant (column)
+# and per individual (row)
+snpsum.row <- row.summary(genotype) #from snpStats
+snpsum.col<-col.summary(genotype)
+
+
+MAF <- snpsum.col$MAF
+callmatrix <- !is.na(genotype)
+```
+
+## Heterozygosity (For individuals)
+
+Heterozygosity refers to the presence of each of two alleles at a given SNP within an individual. This is expected under Hardy-Weinberg Equilibrium (HWE) to occur with probability of 2p(1-p) where p is the dominant allele frequency at that SNP (assuming a bi-allelic SNP). Excess or deficient heterozygosity across typed SNPs within an individual is commonly considered as an indication of inbreeding but also serves as a screen for poor sample quality.
+
+In this lab, heterozygosity F statistic calculation is carried out with the form, \|F\|=(1-O/E), where O is observed proportion of heterozygous genotypes for a given sample and E is the expected proportion of heterozygous genotypes for a given sample based on the minor allele frequency across all non-missing SNPs for a given sample. We will remove any sample with inbreeding coefficient \|F\| \> 0.05, which might indicate autozygosity (which is not inherently a problem, but perhaps unusual) or poor quality sample.
+
+```{r}
+hetExp <- callmatrix %*% (2*MAF*(1-MAF)) #Note that %*% is the 'multiply_by_matrix' function from plyr
+
+hetObs <- with(snpsum.row, Heterozygosity*(ncol(genotype))*Call.rate)
+snpsum.row$hetF <- 1-(hetObs/hetExp)
+
+plot(hetObs,hetExp);abline(0,1)
+hist(snpsum.row$hetF,main="Distribution of observed vs. expected heterozygosity across variants")
+head(snpsum.row)
+
+het.thresh <- 0.05
+
+keep.het <- with(snpsum.row, abs(hetF) <= het.thresh)
+keep.het[is.na(keep.het)] <- FALSE  
+cat(nrow(genotype)-sum(keep.het), "individuals will be removed due to low sample call rate or unusual F coefficient.\n")
+```
+
+**Only 4 individual fail in threshold of 0.05,means that the sample had a high quality and without inbreeding evidence.**
+
+As before, after identifying the individuals to be removed, we subset the genotype and clinical data set using information obtained above to remove the individuals that do not pass the criteria from our sample.
+
+```{r}
+genotype <- genotype[keep.het,]
+clinical<- clinical[rownames(genotype), ]
+```
+
+After removing individuals, summary statistics of the genetic data change. Recalculate sumstats.
+
+```{r}
+snpsum.row<-row.summary(genotype)
+```
+
+## Call rate (For individuals)
+
+To filter by call rate, we remove individuals that are missing genotype data across more than a pre-defined percentage of the typed SNPs. This proportion of missingness across SNPs is the sample call rate and we apply a threshold of 50%, meaning that we drop those individuals missing genotype data for more than 50% of the typed SNPs. A new reduced dimesion SnpMatrix gentotype is created from this filter.
+
+```{r}
+samplecall.thresh <- 0.97
+
+# Subset the genotype and clinical data yet again
+keep.samplecall <- with(snpsum.row, !is.na(Call.rate) & Call.rate > samplecall.thresh)
+keep.samplecall[is.na(keep.samplecall)] <- FALSE 
+cat(nrow(genotype)-sum(keep.samplecall), "individuals will be removed due to low sample call rate.\n")
+
+genotype <- genotype[keep.samplecall,]
+clinical<- clinical[ rownames(genotype), ]
+snpsum.row<-row.summary(genotype)
+```
+
+**Will be removed 1 individual for this step**
+
+## Hardy-Weinberg Equilibrium (For SNPs)
+
+In a population with completely random mating, no selection, no mutation, no migration, and a large size, the genotype frequencies derived from the allele frequencies must be $p^2$ to AA genotype, $2pq$ to Aa genotype and $q^2$ to aa genotype. If the data show proportions that differ significantly from these, that SNP is not in Hardy-Weinberg equilibrium.
+
+Biological causes:
+
+-   Inbreeding → reduces the number of heterozygotes
+
+-   Natural selection → some genotype combinations are lethal
+
+-   Population stratification → the Wahlund effect that we discussed in class
+
+```{r}
+hardy.thresh <- 10^-6     #the threshold is parameterized as a p-value, not a z score as in col.summary
+
+controls <- as.character(clinical[ clinical$CAD==0, 'FamID' ]) 
+#use col.summary on genetic data from controls only
+snpsum.colControls <- col.summary(genotype[controls,])  
+
+#use qnorm to convert the p value threshold 'hardy' to a z score
+keep.hwe <- with(snpsum.colControls, !is.na(z.HWE) & ( abs(z.HWE) < abs( qnorm(hardy.thresh/2) ) ) )
+
+# We can delete this object now
+rm(snpsum.colControls)
+
+keep.hwe[is.na(keep.hwe)] <- FALSE          
+
+cat(ncol(genotype)-sum(keep.hwe),"SNPs will be removed due to deviation from HWE.\n") 
+cat("SNPs que pasan HWE:", sum(keep.hwe, na.rm=TRUE), "\n")
+
+
+# Subset the genotype data yet again
+genotype <- genotype[,keep.hwe]
+
+# Check the dimensionality of the working genotype matrix
+print(genotype)
+```
+
+**767 SNP s will be removed due to deviation from HWE**
+
+## Cryptic relatedness, duplicates and gender indetity (For individuals)
+
+Population-based cohort studies often only concerns unrelated individuals and the generalized linear modeling approach assumes independence across individuals. In regional cohort studies (e.g. hospital-based cohort studies) of complex diseases, however, individuals from the same family could be unintentionally recruited. To mitigate this problem, we thus employ Identity-by-descent (IBD) analysis which is a common measurement of relateness and duplication. Note that gender identity can also be checked at this stage to confirm self-reported gender consistency on X and Y chromosomes. With this data, we do not check gender identity due to unavailibility of sex chromosomes information.
+
+To filter on relateness criteria, we use the SNPRelate package to perform identity-by-descent (IBD) analysis. This package requires that the data be transformed into a GDS format file. IBD analysis is performed on only a subset of SNPs that are in linkage equilibrium by iteratively removing adjacent SNPs that exceed an linkage disequilibrium (LD) threshold in a sliding window using the snpgdsLDpruning() function. In this lab, we set LD threshold to be 80% and kinship threshold to be 2.5%, which means that we would remove any SNPs whose relevant statistics are higher than our stated threshold values. Then we used snpgdsBED2GDS to create a GDS file of the data set from .bim, .bed and .fam files.
+
+```{r}
+ld.thresh <- 0.2   #maximum r2 between variants in 0.2 
+kin.thresh <- 0.04 #for context, the kinship coefficient for 1st cousins is 0.0625
+# twins is 1, unrelated near 0
+
+# Create a specialized 'genetic data set' or .gds object using a function from
+# SNPRelate package. It reads from the original files, and subsets to the individuals and
+# and variants in the current 'genotype' object
+snpgdsBED2GDS(bedFile, famFile, bimFile,"GWAS_data.gds") 
+genofile <- snpgdsOpen("GWAS_data.gds", readonly = FALSE)
+
+
+gds.ids <- read.gdsn(index.gdsn(genofile, "sample.id"))
+gds.ids <- sub("-1", "", gds.ids)
+add.gdsn(genofile, "sample.id", gds.ids, replace = TRUE)
+
+
+# Generate a subset of variants in low linkage disequilibrium for IBD and PCA,
+# as these methods assume independence of variants
+set.seed(1000)
+snpSUB <- snpgdsLDpruning(genofile,
+                          verbose=TRUE,
+                          ld.threshold = ld.thresh,
+                          maf=0.05,
+                          missing.rate=0.05,
+                          sample.id = rownames(genotype), 
+                          snp.id = colnames(genotype)) 
+
+snpset.LoLD <- unlist(snpSUB, use.names=FALSE)
+
+
+cat(length(snpset.LoLD),"will be used in IBD analysis\n")
+
+# Use another function in SNPRelate to estimate Identity by Descent between
+# all participants using a Method of Moments estimator
+geno.sample.ids <- rownames(genotype)
+
+ibd <- snpgdsIBDMoM(genofile, kinship=TRUE, sample.id = geno.sample.ids, snp.id = snpset.LoLD,  num.thread = numCores)
+ibdcoeff_all <- snpgdsIBDSelection(ibd)    
+
+head(ibdcoeff_all)
+
+#select those pairs that have kinship greater than the threshold value for
+# further evaluation
+kins<-subset(ibdcoeff_all,ibdcoeff_all$kinship>kin.thresh) 
+
+ibdcoeff <- ibdcoeff_all[ ibdcoeff_all$kinship >= kin.thresh, ]
+related.samples <- NULL
+
+#remove one member of each related pair from the dataset
+
+related.samples <- c()
+    for (i in 1:nrow(kins)) {
+        # Select ID based on highest k1 value
+        selected_id <- ifelse(runif(1)>0.5,kins$ID1[i], kins$ID2[i])
+        related.samples <- c(related.samples, selected_id)
+    }
+
+#Subset the genotype and clinical data yet again
+genotype <- genotype[ !(rownames(genotype) %in% related.samples), ]
+clinical <- clinical[ !(clinical$FamID %in% related.samples), ]
+
+cat(length(related.samples), " samples removed due to kinship >=", kin.thresh,"\n") 
+
+
+#evaluate the distribution of pairwise kinships
+#this is ALL PAIRS of individuals, mostly minimally related (unrelated)
+plot(ibdcoeff_all$k0,ibdcoeff_all$k1,xlim=c(0,1),ylim=c(0,1),xlab="IBD0",ylab="IBD1",main="IBD of all individuals")
+plot(kins$k0,kins$k1,xlim=c(0,1),ylim=c(0,1),xlab="IBD0",ylab="IBD1",main="IBD of related individuals")
+```
+
+**15 individuals will be removed in this step**
+
+## PCA
+
+Principle components of Ancestry is one approach to visualizing and classifying individuals into ancestry groups based on their observed genetic similarity. There are two reasons for doing this. First, self-reported ancestry can differ from clusters of individuals that are based on genetics infomation. Second, the presence of an individual not appearing to fall within a genetic similarity cluster may be suggestive of a sample error.
+
+```{r}
+# Use another function from SNPRelate to generate PCs, by default, this function estimates
+# the first 32 PCs
+pca <- snpgdsPCA(genofile, sample.id = geno.sample.ids,  snp.id = snpset.LoLD, num.thread=numCores)
+
+pcs <- data.frame(FamID = pca$sample.id, pca$eigenvect[,1 : 10], stringsAsFactors = FALSE)
+
+colnames(pcs)[2:11]<-paste("pc", 1:10, sep = "")
+
+print(head(pcs))
+
+pctab <- data.frame(sample.id = pca$sample.id,
+                    PC1 = pca$eigenvect[,1],    
+                    PC2 = pca$eigenvect[,2],
+                    PC3 = pca$eigenvect[,3],
+                    PC4 = pca$eigenvect[,4],
+                    stringsAsFactors = FALSE)
+
+
+# To evaluate the pattern of how much genetic variation is captured by PCs,
+# we simply plot the eigenvalue.
+plot(pca$eigenval,ylab="Eigenvalue",xlab="Index of Eigenvector",xlim=c(1,20),pch=20,main="Scree plot")
+
+
+par(mfrow= c(2,2))
+plot(pctab$PC2, pctab$PC1, xlab="Principal Component 2", ylab="Principal Component 1", main = "Ancestry Plot",pch=".")
+plot(pctab$PC3, pctab$PC1, xlab="Principal Component 3", ylab="Principal Component 1", main = "Ancestry Plot",pch=".")
+plot(pctab$PC4, pctab$PC1, xlab="Principal Component 4", ylab="Principal Component 1", main = "Ancestry Plot",pch=".")
+plot(pctab$PC2, pctab$PC3, xlab="Principal Component 2", ylab="Principal Component 3", main = "Ancestry Plot",pch=".")
+
+# What would we need to change to estimate all PCs from which we could find
+# the trace and express the eigenvalues as the proportion of variance?
+# the snpgdsPCA captures this measure for the the calculated eigenvalues, check out pca$varprop 
+
+
+# Terminate our special .gds file. R gets cranky if you close a session and
+# the link to the gds is open
+closefn.gds(genofile)
+
+
+#save the processing in this step for the next lab
+#write.csv(pctab, file = "pctab.csv", row.names = FALSE)
+save(genotype,genoMap,snpsum.col, snpsum.row, genofile, clinical, pcs, file= "lab2_save.RData")
+```
+
+# Lab 3 - GWAS
+
+Here, we use a function we’ve written GWAA() to conduct the analysis. The GWAA function requires two arguments. The genotype argument should specify the entire genotype data object in SnpMatrix format. The phenodata argument should be a data frame with a column of sample IDs, corresponding to the row names of genotype, followed by columns for the outcome variable and covariates to be included in the model. In the following code, we assign the genotype variable and write out a table called GWAA.txt for the results to later be written to.
+
+```{r, message=FALSE}
+rm(list=ls())
+
+library(dplyr)
+library(doParallel)
+library(devtools)
+
+# below are some of the plotting tools that we used before using 'source' in devtools
+source("https://raw.githubusercontent.com/CrisVanHout-LIIGH/Class/refs/heads/main/LabFunctions.R")
+setwd("/home/yael/Documents/Statistical Genetics")
+load("lab2_save.RData")
+
+#Print the number of SNPs to be checked
+cat(paste(ncol(genotype), "Thus far, SNPs are included in analysis.\n"))
+cat(paste(nrow(genotype), "Thus far, participants are included in analysis.\n"))
+
+#create text file for GWAA output to be written to
+columns<-c("SNP", "Estimate", "Std.Error", "t-value", "p-value")
+
+write.table(t(columns), "GWAA.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+```
+
+## Manipulating Phenotype Data
+
+Next we focus on the phenodata argument. First we assign phenoSub to be 'phenodata', which is created from merging the clinical and pcs data. We then create the phenotype value (dependent or outcome variable) by choosing (or not) a transformation of the phenotype variable. Next we remove anyone that doesn’t have data available, and subset the genotype data for the remaining individuals. Lastly, we want to remove variables that won’t be used in analysis, e.g. the remaining outcome variables and the untransformed version of the phenotype.
+
+```{r}
+
+traitName <- "Serum_AST_UnitsL"
+hist(clinical$Serum_AST_UnitsL)
+
+
+clinicalSub <- clinical[, c("FamID", "sex", "age", "alcohol_drinks_pw", "BMI_cov", traitName)]
+names(clinicalSub)[names(clinicalSub) == traitName] <- "raw_trait"
+
+#Transformation
+clinicalSub$phenotype <- rntransform(as.numeric(as.character(clinicalSub$raw_trait)))
+#clinicalSub$phenotype <- log(as.numeric(clinicalSub$raw_trait)) #natural log
+#clinicalSub$phenotype <- as.numeric((clinicalSub$raw_trait))  
+clinicalSub$raw_trait <- NULL
+
+
+# Subset pcs to keep FamID and any PCs that you choose to include
+pcsSub <- pcs[, c("FamID", "pc1", "pc2", "pc3", "pc4")]
+
+# Merge clinicalSub and pcsSub by FamID
+phenodata <- merge(clinicalSub, pcsSub, by = "FamID")
+
+# Remove rows with missing phenotype values
+phenodata <- phenodata[!is.na(phenodata$phenotype), ]
+
+# Align genotype rows to phenodata
+phenodata <- phenodata[as.character(phenodata$FamID) %in% rownames(genotype), ]
+genotype  <- genotype[as.character(phenodata$FamID), ]
+
+epidemological_model<-glm(phenotype~.-FamID,data=phenodata,family=gaussian) #not testing any snps, but all covariates included in phenodata (except FamID)
+summary(epidemological_model)
+```
+
+Note that the GWAS model in the GWAA function takes all variables in the 'phenodata' data.frame as covariates, i.e. age sex and any pcs. One may control which covariates are included in the phenodata data.frame, or by changing the glm in the GWAA function to explicitly account for covariates.
+
+```{r}
+print(head(phenodata))
+
+par(mfrow= c(1,2))
+hist(as.numeric(clinical[,c(traitName)]), main= "Untransformed", xlab=paste(traitName))
+hist(phenodata$phenotype, main="Transformed", xlab=paste(traitName))
+```
+
+## The GWAA function
+
+The function itself has four major elements. Given the data described above, it
+
+1.  determines how many cores to use/which method to employ for parallel processing
+
+2.  converts the genotype data into the necessary format for an additive model,
+
+3.  fits a linear model for each SNP and covariates (one group at a time) and then
+
+4.  writes the SNP coefficient details (the estimate, standard error, test statistic and p value) from each model out to the GWAA.txt file.
+
+Note that each core uses about 250Mb memory to analyze all autosomes \~350k variants, or 2Gb total. Low memory computers may want to reduce the number of hosts to 2 or even 1 to limit use of RAM. (and/or close your memory hungry web browser while you run this analysis!)
+
+```{r}
+GWAA <- function(genotype, phenodata, filename = NULL, append = FALSE, workers = getOption("mc.cores", 2L), flip = FALSE, select.snps = NULL, hosts = (detectCores()/2)) {
+    if (is.null(hosts)) {
+        cl <- makeCluster(workers)
+    } else {
+        cl <- makeCluster(hosts, "PSOCK")
+    }
+    show(cl)
+    registerDoParallel(cl)
+    # Function that will change which allele is counted (major or minor)
+    flip.matrix <- function(x) {
+        zero2 <- which(x == 0)
+        two0 <- which(x == 2)
+        x[zero2] <- 2
+        x[two0] <- 0
+        return(x)
+    }
+    foreach(part = 1:nSplits) %do% {
+        genoNum <- as(genotype[, snp.start[part]:snp.stop[part]], "numeric")
+        # flip.matrix function employed
+        if (isTRUE(flip)) 
+            genoNum <- flip.matrix(genoNum)
+        rsVec <- colnames(genoNum)
+        res <- foreach(snp.name = rsVec, .combine = "rbind") %dopar% {
+          pheno_tmp <- phenodata
+          pheno_tmp$snp <- genoNum[, snp.name]
+          fit <- glm(phenotype ~ . - FamID, family = gaussian, data = pheno_tmp)
+          summary(fit)$coefficients["snp", ]
+        }
+        
+        
+write.table(cbind(rsVec, res), filename, append = TRUE, quote = FALSE, col.names = FALSE, row.names = FALSE)
+    cat(sprintf("GWAS SNPs %s-%s (%s%% finished)\n", snp.start[part], snp.stop[part], 100 * part/nSplits))
+    }
+  stopCluster(cl)
+  return(print("Done."))
+}
+```
+
+```{r}
+# Perhaps test the function on a subset of the data. Change the commented out lines below to control full GWAS vs. single chromosome
+
+#this takes about 30seconds on 8 cores, chr10 is close to the genomewide average
+#SNPsToTest <- genoMap$SNP[genoMap$chr==10]
+#so, this should take about 22 times as long as chr10
+SNPsToTest <- genoMap$SNP[genoMap$chr<=22] 
+
+genotype_subset <- genotype[,colnames(genotype)%in%SNPsToTest]
+
+nSNPs <- ncol(genotype_subset)
+nSplits <- 20
+genosplit <- ceiling(nSNPs/nSplits) # number of SNPs in each subset
+snp.start <- seq(1, nSNPs, genosplit) # index of first SNP in group
+snp.stop <- pmin(snp.start+genosplit-1, nSNPs) # index of last SNP in group
+
+```
+
+```{r}
+#Run the GWAS
+start <- Sys.time()
+GWAA(genotype_subset, phenodata, filename="/home/yael/Documents/Statistical Genetics/GWAA.txt") #note this file has 5 columns; SNP,Estimate,Std.Error,t-value,Pr(>|t|)
+cat(paste(ncol(genotype_subset), "running GWAS for this many SNPs.\n"))
+end <- Sys.time()
+print(end-start) #output approximately how long the analysis took to compute
+
+gwas <- read.table("/home/yael/Documents/Statistical Genetics/GWAA.txt", header = TRUE)
+
+gwasAnnotation<- gwas %>% left_join(genoMap, by = "SNP") #Annotate variant information for any SNP that exists in the gwas output. left_join annotates any SNP in the gwas data.frame with information from genoMap. right_join annotates any SNP in the genoMap data.frame with information from gwas. #note that base R 'merge' threw an error that the vectors in the merge were too long, which they shouldn't be, but this works as expected
+colnames(gwasAnnotation)[colnames(gwasAnnotation) == "chr"] <- "CHR"
+colnames(gwasAnnotation)[colnames(gwasAnnotation) == "position"] <- "BP"
+colnames(gwasAnnotation)[colnames(gwasAnnotation) == "p.value"] <- "P"
+
+```
+
+```{r}
+# now, some essential visualizations
+par(mfrow = c(1, 1)) 
+bonCorrection<-0.05/nrow(gwas)
+manhattan(gwasAnnotation,suggestiveline = F, genomewideline = -log10(bonCorrection), col =(c("#CD5C5C","#4682B4", "#E2D200")))
+QQ_plot(gwasAnnotation$P)
+
+# check out the most significant associations
+gwasAnnotation[order(gwasAnnotation$P), ][1:5, ]
+
+# Extract a significantly associated variant from genotype matrix
+variant <- gwasAnnotation[order(gwasAnnotation$P), ][1,1 ] #select top association
+#variant <- "rs2275707" #or select a specific variant by rsID
+snp_subset <- genotype[, c(variant), drop = FALSE]  # Keep as dataframe
+
+#evaluate relevant annotation for the variant and recode to the original allelic coding
+variantAnnotation<-gwasAnnotation[gwasAnnotation$SNP == variant, , drop = FALSE]
+variantAnnotation
+snpsum.col[variant, , drop = FALSE]
+```
+
+```{r}
+# Finally, for continuous traits, we build a small dataframe of clinical and variant data for plotting
+# We may select the untransformed variable for plotting
+#clinical_subset <- clinical[, c(traitName), drop = FALSE]  # Ensure it remains a dataframe
+# or
+# Select the transformed variable that was used in the GWAS
+# Do not run for binary outcomes
+
+if(1==1){ #set to 1==0 for binary outcomes to skip this step
+clinical_subset <- clinicalSub[, "phenotype", drop = FALSE];traitName<-"phenotype"
+rownames(clinical_subset) <- clinicalSub$FamID
+
+# Merge both pheno and geno datasets by rownames (assuming sample IDs are rownames)
+# Clean up the format
+genopheno.df <- merge(clinical_subset, snp_subset, by = "row.names")  
+genopheno.df$Row.names <- NULL
+genopheno.df[[traitName]] <- as.numeric(genopheno.df[[traitName]])
+genopheno.df[[variant]] <- as.factor(as.numeric(genopheno.df[[variant]]))
+
+# Note that this recoding is only valid if the GWAA flip=FALSE,
+# if flip=TRUE, the genotype coded by 3 is always the minor allele homozygote
+genopheno.df$variant_recoded <- ifelse(genopheno.df[[variant]] == 0, NA,
+                       ifelse(genopheno.df[[variant]] == 1, 
+                        paste(variantAnnotation$A1, variantAnnotation$A1, sep = ""),
+                         ifelse(genopheno.df[[variant]] == 2, 
+                          paste(variantAnnotation$A1, variantAnnotation$A2, sep = ""),
+                           paste(variantAnnotation$A2, variantAnnotation$A2, sep = ""))))
+
+genopheno.df$variant_recoded <- factor(genopheno.df$variant_recoded,levels = c("GG", "GT", "TT"))
+
+
+# Orient the model in the context of the genotype
+head(genopheno.df)
+table(genopheno.df[[variant]])
+table(genopheno.df$variant_recoded)
+
+# Filter out rows where variant is missing
+genopheno.df.nomiss <- genopheno.df[genopheno.df[[variant]] != 0, ]
+
+library(rlang) #this package allows us to interpret the variables 'variant' and 'traitName' as below
+
+# Recall, this plot uses the phenotype values as used in the GWAS.
+mixedPlot <- ggplot(genopheno.df.nomiss, aes(x = variant_recoded, y = !!sym(traitName), fill = variant_recoded)) +
+    geom_flat_violin(alpha = 0.5, position = position_nudge(x = .2, y = 0)) +
+    geom_jitter(alpha = 0.5, width = 0.15) +
+    geom_boxplot(alpha = 0.5, width = .25, outlier.shape = NA) +
+    labs(
+        title = paste("AST levels by genotype at", variant),
+        x = "Genotype",
+        y = "AST (RINT, SD units)",
+        caption = paste0(
+            "β = 0.434 SD per T allele (rntransformed scale)\n",
+            "p = 5.34×10⁻¹⁹ | Additive model | n = 1,323")) +
+    theme_minimal() +
+    theme(legend.position = "none")
+
+mixedPlot
+}
+```
+
+```{r}
+if(1==1){
+
+#Use raw AST in U/L instead of the transformed one
+clinical_raw <- clinical[, c("Serum_AST_UnitsL"), drop = FALSE]
+colnames(clinical_raw) <- "AST_UL"
+traitName_plot <- "AST_UL"
+
+# Merge both pheno and geno datasets by rownames (assuming sample IDs are rownames)
+# Clean up the format
+genopheno.df <- merge(clinical_raw, snp_subset, by = "row.names")
+genopheno.df$Row.names <- NULL
+genopheno.df[[traitName_plot]] <- as.numeric(genopheno.df[[traitName_plot]])
+genopheno.df[[variant]] <- as.factor(as.numeric(genopheno.df[[variant]]))
+
+# Note that this recoding is only valid if the GWAA flip=FALSE,
+# if flip=TRUE, the genotype coded by 3 is always the minor allele homozygote
+genopheno.df$variant_recoded <- ifelse(
+    genopheno.df[[variant]] == 0, NA,
+    ifelse(genopheno.df[[variant]] == 1,
+           paste(variantAnnotation$A1, variantAnnotation$A1, sep = ""),
+    ifelse(genopheno.df[[variant]] == 2,
+           paste(variantAnnotation$A1, variantAnnotation$A2, sep = ""),
+           paste(variantAnnotation$A2, variantAnnotation$A2, sep = ""))))
+
+genopheno.df$variant_recoded <- factor(
+    genopheno.df$variant_recoded,
+    levels = c("GG", "GT", "TT"))  # orden lógico
+
+# Orient the model in the context of the genotype
+table(genopheno.df[[variant]])
+table(genopheno.df$variant_recoded)
+
+# Filter out rows where variant is missing
+genopheno.df.nomiss <- genopheno.df[genopheno.df[[variant]] != 0, ]
+
+# Recall, this plot uses the phenotype values as used in the GWAS.
+library(rlang)
+mixedPlot_raw <- ggplot(
+    genopheno.df.nomiss, 
+    aes(x = variant_recoded, 
+        y = !!sym(traitName_plot), 
+        fill = variant_recoded)) +
+    geom_flat_violin(
+        alpha = 0.5, 
+        position = position_nudge(x = .2, y = 0)) +
+    geom_jitter(alpha = 0.5, width = 0.15) +
+    geom_boxplot(
+        alpha = 0.5, 
+        width = .25, 
+        outlier.shape = NA) +
+    labs(
+        title = paste("AST levels by genotype at", variant),
+        x = "Genotype",
+        y = "Serum AST (U/L)",
+        caption = paste0(
+            "β = 0.434 SD per T allele (rntransformed scale)\n",
+            "p = 5.34×10⁻¹⁹ | Additive model | n = 1,323")) +
+    theme_minimal() +
+    theme(legend.position = "none")
+
+mixedPlot_raw
+}
+```
+
+```{r}
+# You have just run a Genome Wide Association Study!
+# What are the units and direction of effect for the association?
+# What gene is this variant in or near?
+# Where is that gene expressed?
+# What is known about the function of that gene in pathways related to the trait?
+# Might there be diagnostic, biomarker, pharmaceutical value to this observation?
+
+#save the processing in this step for the next lab
+save(gwas,gwasAnnotation,genopheno.df,genopheno.df.nomiss,genotype,genoMap,snpsum.col, snpsum.row, genofile, clinical, pcs, file= "lab3_save.RData")
+```
+
+# Lab 4 - GWAS Variant Annotation
+
+```{r}
+rm(list = ls())
+
+# Libraries
+library(dplyr)
+library(downloader)
+library(VariantAnnotation)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(org.Hs.eg.db)
+library(gt)
+
+setwd("/home/yael/Documents/Statistical Genetics")
+
+# Load saved objects
+load("lab3_save.RData")
+
+source("https://raw.githubusercontent.com/CrisVanHout-LIIGH/Class/refs/heads/main/LabFunctions.R")
+download("https://raw.githubusercontent.com/CrisVanHout-LIIGH/Class/main/ProCodgene_coords.csv",
+         destfile = "ProCodgene_coords.csv")
+
+# Load and annotate GWAS results
+# Note: if merge runs out of memory see https://stackoverflow.com/questions/51295402/r-on-macos-error-vector-memory-exhausted-limit-reached
+GWASout <- read.table("GWAA.txt", header = TRUE,
+                      colClasses = c("character", rep("numeric", 4)))
+colnames(GWASout) <- c("SNP", "effect", "stdErr", "tValue", "pValue")
+GWASout$Neg_logP  <- -log10(GWASout$pValue)
+GWASout <- merge(GWASout, genoMap[, c("SNP", "chr", "position", "A1", "A2")], by = "SNP")
+GWASout$MAF <- snpsum.col[GWASout$SNP, "MAF"]
+GWASout <- arrange(GWASout, -Neg_logP)
+
+genes <- read.csv("ProCodgene_coords.csv", stringsAsFactors = FALSE)
+
+# Utility: extract SNPs within a window around a named gene
+map2gene <- function(gene, coords, SNPs, extend.boundary = 10000) {
+  coordsSub       <- coords[coords$gene == gene, ]
+  coordsSub$start <- coordsSub$start - extend.boundary
+  coordsSub$stop  <- coordsSub$stop  + extend.boundary
+  SNPsub <- SNPs[SNPs$position >= coordsSub$start &
+                   SNPs$position <= coordsSub$stop  &
+                   SNPs$chr      == coordsSub$chr,  ]
+  return(data.frame(SNPsub, gene = gene, stringsAsFactors = FALSE))
+}
+
+# --- Top-hit annotation ---
+
+N       <- 5
+topHits <- GWASout[order(GWASout$pValue), ][1:N, ]
+
+# Build GRanges for top hits
+targets <- with(topHits,
+                GRanges(seqnames = Rle(paste0("chr", chr)),
+                        ranges   = IRanges(position, end = position, names = SNP),
+                        strand   = Rle("*")))
+
+# Locate variants relative to UCSC known genes
+loc       <- locateVariants(targets, TxDb.Hsapiens.UCSC.hg19.knownGene, AllVariants())
+out       <- as.data.frame(loc, row.names = NULL)
+out$names <- names(targets)[out$QUERYID]
+out       <- unique(out[, c("names", "seqnames", "start", "end", "LOCATION", "GENEID")])
+
+# Convert Entrez IDs to gene symbols via AnnotationDbi
+# Note: keep gene symbols out of Excel (auto-converts e.g. MARCH1 to dates)
+entrezIDs    <- unique(na.omit(as.character(out$GENEID)))
+symbolMap    <- AnnotationDbi::select(org.Hs.eg.db,
+                                      keys    = entrezIDs,
+                                      columns = "SYMBOL",
+                                      keytype = "ENTREZID")
+out$GENESYMBOL <- symbolMap$SYMBOL[match(as.character(out$GENEID), symbolMap$ENTREZID)]
+
+# Merge annotation back to top hits
+# all.x = TRUE preserves SNPs with no gene overlap; duplicates arise for multi-gene loci
+annotatedHits <- merge(topHits, out, by.x = "SNP", by.y = "names", all.x = TRUE)
+annotatedHits <- dplyr::select(annotatedHits, -any_of(c("start", "tValue", "Neg_logP",
+                                                 "seqnames", "GENEID", "end")))
+annotatedHits <- annotatedHits[, c("SNP", "chr", "position", "A1", "A2", "MAF",
+                                   "effect", "stdErr", "pValue",
+                                   "LOCATION", "GENESYMBOL")]
+annotatedHits <- arrange(annotatedHits, pValue)
+
+# Display formatted table
+# Reference: Table 1 style from https://www.nature.com/articles/ng.2797
+annotatedHits %>%
+  gt() %>%
+  tab_header(
+    title    = "Top GWAS Hits",
+    subtitle = "Annotated with gene symbols and genomic position"
+  ) %>%
+  fmt_number(columns = c(effect, stdErr, MAF), decimals = 3) %>%
+  fmt_scientific(columns = pValue, decimals = 2) %>%
+  cols_label(
+    SNP        = "rsID",
+    chr        = "Chromosome",
+    position   = "Position",
+    A1         = "Allele 1",
+    A2         = "Allele 2",
+    MAF        = "MAF",
+    effect     = "Effect Size",
+    stdErr     = "Std. Error",
+    pValue     = "P-value",
+    LOCATION   = "Location",
+    GENESYMBOL = "Gene Symbol"
+  ) %>%
+  tab_options(table.font.size = 12, heading.align = "center")
+```
